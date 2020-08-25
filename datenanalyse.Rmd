@@ -1,0 +1,728 @@
+---
+title: "Analyseprojekt"
+author: "Marcel da Silva"
+date: "20. Mai 2020"
+output: 
+  pdf_document:
+    latex_engine: xelatex
+    toc: true
+    toc_depth: 2
+
+header-includes:
+  - \usepackage{lscape}
+  - \newcommand{\blandscape}{\begin{landscape}}
+  - \newcommand{\elandscape}{\end{landscape}}
+
+---
+
+```{r setup, include=FALSE}
+debug <- FALSE
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library("dplyr")
+library("ggplot2")
+library("skimr")
+library("kableExtra")
+library("psych")
+library("ggpubr")
+library("mgcv")
+
+colors <- artyfarty::pal("five38")
+theme_set(theme_bw())
+
+openbeerdb.beers <- read.csv("daten/beers.csv", comment.char="#")
+openbeerdb.breweries <- read.csv("daten/breweries.csv", comment.char="#")
+openbeerdb.breweries_geocode <- read.csv("daten/breweries_geocode.csv", comment.char="#")
+openbeerdb.categories <- read.csv("daten/categories.csv", comment.char="#")
+openbeerdb.styles <- read.csv("daten/styles.csv", comment.char="#")
+
+if(debug) {
+  beer_reviews <- read.csv("daten/beer_reviews_small.csv")
+  # x <- sample(1:100000, 1)
+  # set.seed(x)
+  # beer_reviews <- beer_reviews[sample(nrow(beer_reviews), 10000),]
+} else {
+  beer_reviews <- read.csv("daten/beer_reviews.csv")
+}
+beer_reviews$review_datetime <- as.POSIXct(beer_reviews$review_time, origin="1970-01-01", tz="GMT")
+beer_reviews$review_date <- as.Date(beer_reviews$review_datetime)
+beer_style_to_category_id <- data.frame(
+  beer_style = c("Hefeweizen", "English Strong Ale", "Foreign / Export Stout", "German Pilsener", "American Double / Imperial IPA", "Herbed / Spiced Beer", "Light Lager", "Oatmeal Stout", "American Pale Lager", "Rauchbier", "American Pale Ale (APA)", "American Porter", "Belgian Strong Dark Ale", "American IPA", "American Stout", "Russian Imperial Stout", "American Amber / Red Ale", "American Strong Ale", "Märzen / Oktoberfest", "American Adjunct Lager", "American Blonde Ale", "Euro Pale Lager", "English Brown Ale", "Scotch Ale / Wee Heavy", "Fruit / Vegetable Beer", "American Double / Imperial Stout", "Belgian Pale Ale", "English Bitter", "English Porter", "Irish Dry Stout", "American Barleywine", "Belgian Strong Pale Ale", "Doppelbock", "Maibock / Helles Bock", "Pumpkin Ale", "Dortmunder / Export Lager", "Euro Strong Lager", "Euro Dark Lager", "Low Alcohol Beer", "Weizenbock", "Extra Special / Strong Bitter (ESB)", "Bock", "English India Pale Ale (IPA)", "Altbier", "Kölsch", "Munich Dunkel Lager", "Rye Beer", "American Pale Wheat Ale", "Milk / Sweet Stout", "Schwarzbier", "Vienna Lager", "American Amber / Red Lager", "Scottish Ale", "Witbier", "American Black Ale", "Saison / Farmhouse Ale", "English Barleywine", "English Dark Mild Ale", "California Common / Steam Beer", "Czech Pilsener", "English Pale Ale", "Belgian IPA", "Tripel", "Flanders Oud Bruin", "American Brown Ale", "Winter Warmer", "Smoked Beer", "Dubbel", "Flanders Red Ale", "Dunkelweizen", "Roggenbier", "Keller Bier / Zwickel Bier", "Belgian Dark Ale", "Bière de Garde", "Japanese Rice Lager", "Black & Tan", "Irish Red Ale", "Chile Beer", "English Stout", "Cream Ale", "American Wild Ale", "American Double / Imperial Pilsner", "Scottish Gruit / Ancient Herbed Ale", "Wheatwine", "American Dark Wheat Ale", "American Malt Liquor", "Baltic Porter", "Munich Helles Lager", "Kristalweizen", "English Pale Mild Ale", "Lambic - Fruit", "Old Ale", "Quadrupel (Quad)", "Braggot", "Lambic - Unblended", "Eisbock", "Berliner Weissbier", "Kvass", "Faro", "Gueuze", "Gose", "Happoshu", "Sahti", "Bière de Champagne / Bière Brut"),
+  id = c(4, 1, 2, 7, 3, 11, 8, 1, 8, 4, 3, 3, 3, 3, 3, 10, 3, 3 , 7, 8, 3, 7, 1, 1, 11, 3, 5, 1, 1, 2, 3, 5, 7, 7, 11, 7, 9, 9, 7, 7 , 1, 7, 1, 7, 7, 7, 11, 11, 1, 7, 7, 8, 1, 5, 3, 3, 1, 1, 11, 10, 1, 5, 5, 5, 3, 11, 11, 5, 5, 4, 11, 4, 5, 5, 11, 2, 2, 10, 1, 11, 3, 8, 1, 11, 3, 8, 9, 7, 7, 1, 5, 1, 5, 11, 5, 7, 7, 11, 5, 5, 4, 10, 10, 11)
+)
+beer_style_to_category <- inner_join(openbeerdb.categories[c("id","cat_name")], beer_style_to_category_id, by="id")
+beer_reviews <- inner_join(beer_reviews, beer_style_to_category, by="beer_style")
+```
+
+```{r debug_note, echo=FALSE}
+if(debug){
+"Dieses Dokument wurde aus einem zufälligen Subset von ca 1.5 Mio Reviews generiert mit seed = "
+# x
+}
+```
+\newpage
+# Ausgangslage
+
+Die Brauerei Milchhütte KLG (https://www.milchhuette.beer/) ist eine junge Brauerei, spezialisiert auf lokale Zutaten und nachhaltiger Produktion. 
+In der momentanen Phase wird noch mit verschiedenen Rezepturen experimentiert und optimiert. 
+Um einen Einstieg in den Markt erfolgreich zu gestalten, würde die Brauerei gerne die Präferenzen der Konsumenten wissen, um so Biere herzustellen, die auch Absatz finden und somit die Brauerei zu Profitabilität führen soll. 
+
+Basierend auf dieser Analyse, soll eine Empfehlung für 3-4 Biersorten gegeben werden.
+
+# Daten
+
+Als erster Schritt wird eine Übersicht über die Brauerei Landschaft weltweit analysiert. Dazu dient als Datenquelle die openbeer database (https://openbeerdb.com/), welche Brauereien, deren Biere (Kategorie und Stil) sowie Standorte enthält (Stand Oktober 2011).
+
+Dazu sind ca. 1.6 Mio Benutzer Reviews von https://www.beeradvocate.com/ zwischen August 2006 und Januar 2012 verfügbar (Datenquelle: https://data.world/socialmediadata/beeradvocate). 
+
+Die Daten sind relativ alt und lassen keinen Schluss zu was heute gelten würde. Mit den Daten kann, so erhoffen wir, Trends zwischen 2006 und 2012 erkennen. Die Daten sind jedoch hauptsächlich von Nordamerikanischen Benutzern, was gemäss Hypothese die Situation in etwa 2010 bis 2016 in Europa entsprechen sollte.
+
+Als Alternative, bzw. zusätzliche Datenquelle, würde sich https://untappd.com/ anbieten. untappd.com wurde 2010 gegründet und hat ins besondere in den letzten zwei bis drei Jahren in Europa sehr an Bekanntheit zugelegt. Sie bieten zudem eine API an, jedoch heisst es da explizit:
+
+> We don't allow any research, analytics or mining based API this time. This is strongly enforced.
+> Quelle: https://untappd.com/api/register 
+
+Auch eine explizite Anfrage einen einmaligen Export der Daten zu bekommen, ist auf Widerstand gestossen:
+
+> Hi there,
+> 
+> Unfortunately, this is not something we are able to provide.  Best of luck to you with your project!
+> Cheers,
+> 
+> Nealey Bell
+> Untappd Support
+
+## These
+Es wird angenommen, dass der Europäische Biermarkt sich stark an den Nordamerikanischen Konsumverhalten orientiert, dies jedoch mit einer Verzögerung von ein paar Jahren. 
+
+\newpage
+# Datenvorbereitung
+
+## openbeer DB
+Dieser Datensatz ist wie folgt aufgeteilt:
+
+* Biere
+* Brauereien
+* Bierkateogrien
+* Bierstile
+
+Da wir nur die Bierkateogrien verwenden werden, lassen wir die restlichen Daten weg.
+
+### Bierkategorien
+Nachfolgend die Felder der Bierkategorien:
+
+* `id`: Die ID der Kategorie
+* `cat_name`: Der Kategorienamen
+* `last_mod`: Änderungsdatum des Datensatzes
+
+```{r beer_categories, echo=FALSE}
+kable(
+  head(openbeerdb.categories),
+  format = 'pandoc', 
+  caption = "Ausschnitt von Tabelle `beer_categories`"
+)
+
+```
+
+### Bierstile
+Nachfolgend die Felder der Bierstile:
+
+* `id`: Die ID des Stils
+* `cat_id`: Die ID der Kategorie (siehe Bierkategorien)
+* `style_name`: Der Name des Stils
+* `last_mod`: Änderungsdatum des Datensatzes
+
+```{r bierstyles, echo=FALSE}
+kable(
+  head(openbeerdb.styles),
+  format = 'pandoc', 
+  caption = "Ausschnitt von Tabelle `beer_styles`"
+)
+```
+
+\newpage
+
+## Benutzer Reviews beeradvocate
+Nachfolgend die Felder der Reviews von beeradvocate. Die Daten wurden gemäss Tabelle in Appendix A mit den Bierkategorien von openbeer DB gemappt (`beeradvocate.beer_style` zu `openbeerdb.category_id`).
+
+* `brewery_name`: Der Name der Brauerei
+* `beer_beerid`: Die ID des Bieres
+* `beer_name`: Der Name des Bieres
+* `beer_style`: Der Bierstil
+* `beer_abv`: Der ABV (alcohol by volume) des Bieres
+* `review_overall`: Die insgesamte Bewertung
+* `review_aroma`: Die Bewertung des Aromas
+* `review_appearance`: Die Bewertung des Aussehens
+* `review_palate`: Die Bewertung des Gaumens
+* `review_taste`: Die Bewertung des Geschmacks
+* `review_profilename`: Der Benutzername des Bewerters
+* `review_time`: Der Zeitpunkt der Bewertung (in unixtimestamp)
+* `review_datetime`: Der Zeitpunkt der Bewertung (in POSIXct)
+
+```{r beer_reviews, echo=FALSE, warning=FALSE}
+lines <- 8
+kable(
+  head(n=lines,beer_reviews[c("brewery_name", "beer_beerid", "beer_name", "beer_style")]),
+  format = 'pandoc', 
+  caption = "Ausschnitt von Tabelle `beer_reviews`"
+)
+kable(
+  head(n=lines,beer_reviews[c("beer_abv", "review_overall", "review_aroma", "review_appearance", "review_palate", "review_taste")]),
+  format = 'pandoc'
+)
+kable(
+  head(n=lines,beer_reviews[c("review_profilename", "review_time", "review_datetime")]),
+  format = 'pandoc'
+)
+
+```
+
+
+
+\newpage
+
+
+## Verteilung der Bewertungen
+Folgender Graph zeigt die Anzahl Bewertungen über die Zeit. beeradvocate scheint immer beliebter geworden zu sein über die Zeit. Die Bewertungen sind bis kurz vor 2002 sehr spärlich nehmen dann aber mehr oder weniger linear zu.
+
+```{r review_count_time, echo=FALSE, fig.cap='Anzahl Bewertungen über die Zeit'}
+  beer_reviews %>%
+    group_by(review_date) %>%
+    mutate(c = n()) %>%
+    ungroup() %>%
+    ggplot(aes(x=review_date)) +
+    geom_bar(aes(x=review_date, y = ..count..),fill = colors[1]) +
+    labs(
+      x = "Jahr",
+      y = "Bewertung"
+    ) +
+    scale_x_date(date_labels="%Y",date_breaks = "1 years") +
+    theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.5)) 
+```
+
+\newpage
+
+Die nachfolgenden Graphen zeigen, dass die Bewertungen tendenziell hoch sind, 50% aller Bewertungen sind jeweils 4 und höher. 
+
+```{r review_distributions, echo=FALSE, fig.show="hold", out.height = '24%', fig.cap="Verteilung der Bewertungen"}
+rating_hist <- function(df, by, title) {
+
+  stats <- df %>% 
+  dplyr::summarise(
+    mean = mean(by),
+    med = median(by)
+  )
+
+  df %>%
+    ggplot(aes(by)) +
+    geom_histogram(aes(y = (..count..)/sum(..count..)), binwidth=0.5, color = "black", fill = colors[1]) +
+    scale_y_continuous(labels=scales::percent) +
+    scale_x_discrete(limits=c(1:5)) +
+    labs(
+      y = 'Anteil',
+      x = 'Bewertung',
+      title = title
+    ) +
+    geom_vline(xintercept = stats$mean, lty = 2, size = .9, color = colors[2]) +
+    geom_vline(xintercept = stats$med, lty = 2, size = .9, color = colors[3]) +
+    annotate("text", 5, 0.5, label = sprintf("average: %.2f",stats$mean), colour=colors[2]) +
+    annotate("text", 5, 0.46, label = sprintf("median: %.2f",stats$med), colour=colors[3]) 
+}
+rating_hist(beer_reviews, beer_reviews$review_overall, 'Insgesamt')
+rating_hist(beer_reviews, beer_reviews$review_aroma, 'Aroma')
+rating_hist(beer_reviews, beer_reviews$review_appearance, 'Aussehen')
+rating_hist(beer_reviews, beer_reviews$review_taste, 'Geschmack')
+rating_hist(beer_reviews, beer_reviews$review_palate, 'Gaumen')
+```
+
+\newpage
+
+# Datenselektion
+```{r review_count_stats, echo = FALSE}
+review_count_stats <- beer_reviews %>% 
+  group_by(beer_style) %>% 
+  dplyr::summarise(count = n()) %>% 
+  dplyr::summarise(
+    mean = mean(count),
+    med = median(count)
+  )
+beer_per_styles <- beer_reviews %>% 
+  group_by(beer_style) %>% 
+  dplyr::summarise(count = n_distinct(beer_beerid)) %>% 
+  dplyr::summarise(
+    mean = mean(count),
+    med = median(count)
+  )
+```
+
+Gemäss nachfolgenden Graphen haben viele Bierstile nur sehr wenige Bewertungen (im Schnitt `r sprintf("%.0f",review_count_stats$mean)`). zudem haben viele Bierstile nur wenige Biere (im Schnitt `r sprintf("%.0f",beer_per_styles$mean)`). 
+
+```{r review_count_hist, echo = FALSE, out.width = '50%', fig.align='center', fig.cap=c('Anzahl Bierstile pro Anzahl Bewertungen','Anzahl Biere pro Bierstil')}
+beer_reviews %>% 
+  group_by(beer_style) %>% 
+  dplyr::summarise(count = n()) %>% 
+  ggplot(aes(beer_style)) +
+  geom_histogram(aes(x=count), color = 'black', fill = colors[1]) + 
+  labs(
+    x = "Anzahl Bewertungen",
+    y = "Anzahl Bierstile"
+  ) + 
+  geom_vline(xintercept = review_count_stats$mean, lty = 2, size = .9, color = colors[2]) +
+  geom_vline(xintercept = review_count_stats$med, lty = 2, size = .9, color = colors[3]) +
+  annotate("text", 100000, 22, label = sprintf("avg: %.0f",review_count_stats$mean), colour=colors[2]) +
+  annotate("text", 100000, 20,  label = sprintf("med: %.0f",review_count_stats$med), colour=colors[3]) 
+
+beer_reviews %>% 
+  group_by(beer_style) %>% 
+  dplyr::summarise(count = n_distinct(beer_beerid)) %>% 
+  ggplot(aes(beer_style)) +
+  geom_histogram(aes(x=count), color = 'black', fill = colors[1]) + 
+  labs(
+    title = "Anzahl Biere pro Bierstil",
+    x = "Anzahl Biere",
+    y = "Bierstile mit Anzahl Biere"
+  ) + 
+  geom_vline(xintercept = beer_per_styles$mean, lty = 2, size = .9, color = colors[2]) +
+  geom_vline(xintercept = beer_per_styles$med, lty = 2, size = .9, color = colors[3]) +
+  annotate("text", 3500, 20, label = sprintf("avg: %.0f",beer_per_styles$mean), colour=colors[2]) +
+  annotate("text", 3500, 18, label = sprintf("med: %.0f",beer_per_styles$med), colour=colors[3]) 
+```
+
+```{r review_per_user_stats, echo=FALSE, out.width = '50%'}
+review_per_user <- beer_reviews %>% 
+  group_by(review_profilename) %>% 
+  dplyr::summarise(count = n()) %>% 
+  dplyr::summarise(
+    mean = mean(count),
+    med = median(count)
+  )
+
+limit <- 50
+```
+
+\newpage
+
+Die meisten Benutzer hinterliessen lediglich eine Bewertung, der Median beträgt `r review_per_user$med` Bewertungen pro Benutzer. Folgender Graph zeigt wieviel Benutzer wieviele Bewertungen abgegeben haben. Der Graph zeigt Benutzer, die bis zu `r limit` Bewertungen abgegeben haben (links) und den vollen Datensatz rechts. 
+
+```{r review_per_user, echo=FALSE, out.width = '50%', fig.align='center', fig.cap=c('Benutzer mit weniger als 30 Bewertungen','Benutzer mit Anzahl abgegebener Bewertungen')}
+review_per_user <- beer_reviews %>% 
+  group_by(review_profilename) %>% 
+  dplyr::summarise(count = n()) %>% 
+  dplyr::summarise(
+    mean = mean(count),
+    med = median(count)
+  )
+
+beer_reviews %>% 
+  group_by(review_profilename) %>% 
+  dplyr::summarise(count = n()) %>% 
+  filter(count<=50) %>% 
+  ggplot(aes(review_profilename)) +
+  geom_histogram(aes(x=count), binwidth=1, color = 'black', fill = colors[1]) + 
+  labs(
+    title = "Benutzer mit weniger als 30 Bewertungen",
+    x = "Anzahl Bewertungen",
+    y = "Anzahl Benutzer"
+  ) +
+  geom_vline(xintercept = review_per_user$mean, lty = 2, size = .9, color = colors[2]) +
+  geom_vline(xintercept = review_per_user$med, lty = 2, size = .9, color = colors[3]) +
+  annotate("text", 40, 10000, label = sprintf("avg: %.0f",review_per_user$mean), colour=colors[2]) +
+  annotate("text", 40, 9000, label = sprintf("median: %.0f",review_per_user$med), colour=colors[3]) 
+
+beer_reviews %>% 
+  group_by(review_profilename) %>% 
+  dplyr::summarise(count = n()) %>% 
+  ggplot(aes(review_profilename)) +
+  geom_histogram(aes(x=count), binwidth=100, color = 'black', fill = colors[1]) + 
+  labs(
+    title = "Benutzer mit Anzahl abgegebener Bewertungen",
+    x = "Anzahl Bewertungen",
+    y = "Anzahl Benutzer"
+  ) +
+  geom_vline(xintercept = review_per_user$mean, lty = 2, size = .9, color = colors[2]) +
+  geom_vline(xintercept = review_per_user$med, lty = 2, size = .9, color = colors[3]) +
+  annotate("text", 5000, 10000, label = sprintf("avg: %.0f",review_per_user$mean), colour=colors[2]) +
+  annotate("text", 5000, 9000, label = sprintf("median: %.0f",review_per_user$med), colour=colors[3]) 
+
+```
+
+\newpage
+
+Da wenige Bewertungen für ein Bierstil, wie auch wenige Biere für ein Bierstil, nicht sehr aussagekräftig ist, werden für die weitere Analyse Bierstile mit weniger als 30 Bewertungen und Biere vernachlässigt. Zudem werden Bewertungen von Benutzer, die weniger als 10 Bewertungen hinterliessen ebenfalls ausgeschlossen.
+
+```{r beer_review_reduce, echo=TRUE}
+beer_reviews <- beer_reviews %>% 
+  group_by(beer_style) %>% 
+  mutate(
+    review_count = n(),
+    beer_count = n_distinct(beer_beerid)    
+  ) %>% 
+  filter(
+    review_count >= 30,
+    beer_count >= 30 
+  ) %>% 
+  ungroup() %>% 
+  group_by(review_profilename) %>% 
+  mutate(count = n()) %>% 
+  filter(count>10) %>% 
+  ungroup()
+```
+
+```{r beer_review_reduce2, echo=FALSE, out.width = '50%',fig.align='center', fig.cap=c('Anzahl Bierstile pro Anzahl Bewertungen (bereinigt)', 'Anzahl Biere pro Bierstil (bereinigt)')}
+
+review_count_stats <- beer_reviews %>% 
+  group_by(beer_style) %>% 
+  dplyr::summarise(count = n()) %>% 
+  dplyr::summarise(
+    mean = mean(count),
+    med = median(count)
+  )
+
+beer_reviews %>% 
+  group_by(beer_style) %>% 
+  dplyr::summarise(count = n()) %>% 
+  ggplot(aes(beer_style)) +
+  geom_histogram(aes(x=count), color = 'black', fill = colors[1]) + 
+  labs(
+    title = "Anzahl Bierstile pro Anzahl Bewertungen",
+    x = "Anzahl Bewertungen",
+    y = "Anzahl Bierstile"
+  ) + 
+  geom_vline(xintercept = review_count_stats$mean, lty = 2, size = .9, color = colors[2]) +
+  geom_vline(xintercept = review_count_stats$med, lty = 2, size = .9, color = colors[3]) +
+  annotate("text", 100000, 22, label = sprintf("avg: %.0f",review_count_stats$mean), colour=colors[2]) +
+  annotate("text", 100000, 20,  label = sprintf("med: %.0f",review_count_stats$med), colour=colors[3]) +
+  expand_limits(x = 0, y = 0)
+
+beer_per_styles <- beer_reviews %>% 
+  group_by(beer_style) %>% 
+  dplyr::summarise(count = n_distinct(beer_beerid)) %>% 
+  dplyr::summarise(
+    mean = mean(count),
+    med = median(count)
+  )
+
+beer_reviews %>% 
+  group_by(beer_style) %>% 
+  dplyr::summarise(count = n_distinct(beer_beerid)) %>% 
+  ggplot(aes(beer_style)) +
+  geom_histogram(aes(x=count), color = 'black', fill = colors[1]) + 
+  labs(
+    title = "Anzahl Biere pro Bierstil",
+    x = "Anzahl Biere",
+    y = "Bierstile mit Anzahl Biere"
+  ) + 
+  geom_vline(xintercept = beer_per_styles$mean, lty = 2, size = .9, color = colors[2]) +
+  geom_vline(xintercept = beer_per_styles$med, lty = 2, size = .9, color = colors[3]) +
+  annotate("text", 3500, 20, label = sprintf("avg: %.0f",review_count_stats$mean), colour=colors[2]) +
+  annotate("text", 3500, 18,  label = sprintf("med: %.0f",review_count_stats$med), colour=colors[3]) 
+  expand_limits(x = 0, y = 0)
+```
+
+
+\newpage
+
+## Anzahl Bewertungen nach Kategorie
+
+Die Anzahl an Bewertungen gibt bereits ein Indiz dafür, welche Biersorten bevorzugt werden. Folgender Graph zeigt die \textcolor{blue}{Anzahl Bewertungen in blau} sowie die \textcolor{orange}{Verteilung der Bewertungen in orange} für jede Kategorie. Die `North American Ale`s haben mit Abstand die meisten Bewertungen und scheinen zudem die beliebtesten zu sein.
+
+```{r reviews_by_categories, echo=TRUE, out.height='80%', fig.align='center', fig.cap='Bewertungen nach Kategorie'}
+
+beer_reviews_mean_by_cat <- beer_reviews %>%
+  group_by(cat_name) %>% 
+  dplyr::summarise(mean=mean(review_overall),
+                   sd=sd(review_overall))
+beer_reviews%>%
+  ggplot(aes(cat_name)) +
+    geom_bar(aes(y = (..count..)/sum(..count..)), color = "black", fill = colors[1]) +
+    labs(
+      x = "Kategorie"
+    ) +
+    theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.5)) + 
+    geom_boxplot(aes(y=review_overall/10), color="orange", fill="orange", alpha=0.2) +
+    # geom_jitter(aes(y=review_overall/10), position = position_jitter(0.4), alpha = 0.01, color=colors[5]) +
+    scale_y_continuous("Anteil Bewertungen", labels=scales::percent, sec.axis = sec_axis(trans =  ~.*10,name = 'Durchschnittliche Bewertung')) + 
+    theme(axis.title.y.right = element_text(color="orange", face="bold"))  + 
+    theme(axis.ticks.y.right = element_line(color="orange"))  + 
+    theme(axis.text.y.right =  element_text(color="orange", face="bold"))  + 
+    theme(axis.title.y.left = element_text(color="#3c9fdc", face="bold"))  + 
+    theme(axis.ticks.y.left = element_line(color="#3c9fdc"))  + 
+    theme(axis.text.y.left =  element_text(color="#3c9fdc", face="bold")) +
+    theme(axis.title.x = element_text(face="bold")) +
+    theme(axis.text.x = element_text(face="bold"))
+```
+
+\newpage
+
+Folgender Graph zeigt die durchschnittliche Bewertung und Anzahl Bewertungen pro Kategorie. Auch hier zeigt sich, dass `North American Ale`s mit Abstand die meisten Bewertungen und zudem die beliebtesten zu sein scheinen. Zudem sehen wir hier, dass je mehr Bewertungen abgegeben wurden, desto höher sind die Bewertungen. Das spricht dafür, dass beliebte Biere eher bewertet werden.
+
+```{r reviews_by_categories2, echo=TRUE, out.height='80%', fig.align='center', fig.cap='Durchschnittliche und Anzahl Bewertungen pro Bierstil (mit geglättete Linie)'}
+beer_reviews %>%
+  group_by(beer_style, cat_name) %>% 
+  summarise(
+    count = mean(n()),
+    avg_rating = mean((review_overall+review_aroma+review_appearance+review_taste+review_palate)/5)
+  ) %>% 
+  ggplot(aes(x=count, y=avg_rating)) +
+  geom_point(aes(shape=factor(cat_name), color=factor(cat_name)), size = 6, alpha=0.4) + 
+  scale_shape_manual(values=c(15:20,15:18)) +
+  labs(
+    color = "Kategorie",
+    shape = "Kategorie",
+    y = "Durchschnittliche Bewertung",
+    x = "Anzahl Bewertungen"
+  ) + 
+  scale_colour_discrete("Kategorie") + 
+  scale_linetype_manual("Kategorie", values=c(1:10)) + 
+  geom_smooth(method = lm, formula = y ~ splines::bs(x, knots=3), size=0.7, se = FALSE, show.legend = FALSE, colour=colors[5]) +
+  scale_y_continuous(expand = c(0.05, 0.05), limits = c(0, 5))
+```
+
+
+\newpage
+
+
+## Anzahl Bewertungen nach Bierstil
+
+Das spiegelt sich natürlich auch in den Bierstilen wider. 7 von 10 Bierstile mit den meisten Bewertungen sind den `North American Ale`s zugeordnet.
+Hingegen die Bierstile, mit den wenigsten Bewertungen von eher seltenen oder sehr speziellen Bieren besetzt wird.
+
+```{r reviews_by_styles, echo=FALSE, message=FALSE}
+limit <- 15
+beer_reviews%>%
+  group_by(cat_name, beer_style) %>% 
+  dplyr::summarise(avg_score = format(round(mean(review_overall),2), nsmall=2),
+                   anteil = sprintf("%.1f%%", n()/nrow(beer_reviews)*100)
+            ) %>% 
+  ungroup() %>%
+  arrange(desc(anteil)) %>% 
+  headTail(limit,limit) %>% 
+  filter(!is.na(cat_name)) %>% 
+  kableExtra::kable(
+    col.names = c("Kategorie", "Bierstil", "Durchschnittliche Bewertung", "Anteil"),
+    caption = "Meist und seltene bewerteste Bierstile"
+  ) %>% 
+  pack_rows("meist bewerteste Bierstile", 1, limit) %>% 
+  pack_rows("selten bewerteste Bierstile", limit+1, 2*limit)
+```
+
+\newpage
+
+## Beste Bewertungen nach Bierstil
+
+Interessant ist, dass die best bewerteste Bierstile einen relativ kleinen Anteil an den Bewertungen haben:
+
+```{r best_reviews_by_styles, echo=FALSE, message=FALSE}
+limit <- 15
+beer_reviews %>%
+  group_by(beer_style, cat_name) %>%
+  dplyr::summarise(avg_score = format(round(mean(review_overall),2), nsmall=2),
+                   anteil = sprintf("%.1f%%", n()/nrow(beer_reviews)*100)) %>%
+  ungroup() %>%
+  arrange(desc(avg_score)) %>% 
+  headTail(limit,limit) %>% 
+  filter(!is.na(cat_name)) %>% 
+  kableExtra::kable(
+    col.names = c("Kategorie", "Bierstil", "Durchschnittliche Bewertung", "Anteil"),
+    caption = "Best und schlecht bewerteste Bierstile"
+  ) %>% 
+  pack_rows("best bewerteste Bierstile", 1, limit) %>% 
+  pack_rows("schlecht bewerteste Bierstile", limit+1, 2*limit)
+```
+
+
+\newpage
+
+## Bewertungen über ABV
+Eine Kennzahl, die wir einerseits zur Verfügung haben, aber auch als Konsument sehr greifbar ist, ist der Alkoholgehalt. Hier scheint ein höherer Gehalt eine positive Auswirkung auf die Bewertungen zu haben (ausser Aussehen). Folgende Graphen zeigen die einelnen Bewertungen für verschiedene Alkoholgehalte
+
+```{r reviews_by_abv, echo=FALSE, out.width = '50%', fig.show="hold", out.height = '24%', fig.cap="Bewertungen über ABV"}
+abv_boxplot <- function(df,by,title){
+  df %>% 
+    mutate(
+      abv_bin = case_when(
+        beer_abv < 5 ~ "< 5%",
+        between(beer_abv, 5, 5.9) ~ "5 - 5.9%",
+        between(beer_abv, 6, 6.9) ~ "6 - 6.9%",
+        TRUE ~ "> 7%"
+      ),
+      abv_bin = factor(abv_bin, levels = c(
+        "< 5%",
+        "5 - 5.9%",
+        "6 - 6.9%",
+        "> 7%"
+      ))
+    ) %>%
+    ggplot(aes(x = abv_bin, y = by, color = abv_bin)) +
+    geom_boxplot(size = 1) +
+    theme(legend.position = "none") +
+    labs(
+      x = "ABV",
+      y = "Bewertung",
+      title = title
+    ) +
+    scale_color_manual(values = colors) + 
+    scale_y_continuous(expand = c(0.05, 0.05), limits = c(0, 5))
+}
+
+abv_boxplot(beer_reviews, beer_reviews$review_overall, 'Insgesamt')
+abv_boxplot(beer_reviews, beer_reviews$review_aroma, 'Aroma')
+abv_boxplot(beer_reviews, beer_reviews$review_appearance, 'Aussehen')
+abv_boxplot(beer_reviews, beer_reviews$review_taste, 'Geschmack')
+abv_boxplot(beer_reviews, beer_reviews$review_palate, 'Gaumen')
+```
+
+\newpage
+
+## Zeitanalyse der Bewertungen 
+
+Die folgenden Graphen zeigen geglättet die einzelnen Bewertungskriterien über die Zeit. Wir sehen, dass die Bewertungen ab 2001 sehr konstant bleiben. Ein Grund dafür könnte sein, dass die Anzahl Bewertungen zugenommen hat über die Zeit. 
+
+```{r reviews_by_cat_over_time, echo=TRUE}
+score_time <- function(df,by,title){
+  df %>%
+    ggplot( aes(x=review_datetime, y=by, group=cat_name, color=cat_name, linetype=cat_name)) +
+    geom_smooth(method = lm, formula = y ~ splines::bs(x, knots=3), size=0.7, se = FALSE, show.legend = FALSE) +
+    labs(
+      color = "Bierkategorie",
+      title = title,
+      x = "Jahr",
+      y = "Bewertung"
+    ) +
+    scale_colour_discrete("") + 
+    scale_linetype_manual("", values=c(1:10)) + 
+    scale_y_continuous(expand = c(0.05, 0.05), limits = c(0, 5))
+}
+```
+```{r reviews_by_cat_over_time2, echo=FALSE, out.width = '50%', fig.show="hold", out.height = '24%', fig.cap="Bewertungen über die Zeit"}
+score_time(beer_reviews, beer_reviews$review_overall, "Insgesamt")
+score_time(beer_reviews, beer_reviews$review_aroma, "Aroma")
+score_time(beer_reviews, beer_reviews$review_appearance, "Aussehen")
+score_time(beer_reviews, beer_reviews$review_taste, "Geschmack")
+score_time(beer_reviews, beer_reviews$review_palate, "Gaumen")
+h <- beer_reviews %>%
+  ggplot( aes(x=review_datetime, y=review_overall, group=cat_name, color=cat_name, linetype=cat_name)) +
+  geom_line() +
+  scale_colour_discrete("") + 
+  theme(legend.key.width = unit(2, 'cm'),legend.box = 'horizontal') +
+  guides(col = guide_legend(nrow = 5)) +
+  scale_linetype_manual("", values=c(1:10)) 
+as_ggplot(cowplot::get_legend(h)) 
+```
+
+
+\newpage
+
+Nachfolgender Graph zeigt, dass über die Zeit der Alkoholgehalt der Biere gestiegen sind.
+
+
+```{r score_by_abv2, echo = TRUE, fig.cap='Alkoholgehalt über die Zeit (geglättet)'}
+beer_reviews %>%
+  ggplot( aes(x=review_datetime, y=beer_abv, group=cat_name, color=cat_name, linetype=cat_name)) +
+  geom_smooth(method = lm, formula = y ~ splines::bs(x, knots=3), size=0.7, se = FALSE) +
+  labs(
+    color = "Bierkategorie",
+    x = "Jahr",
+    y = "ABV"
+  ) +
+  theme(legend.key.width = unit(2, 'cm'),legend.box = 'horizontal') +
+  scale_colour_discrete("") + 
+  scale_linetype_manual("", values=c(1:10)) + 
+  scale_y_continuous(expand = c(0.05, 0.05), limits = c(0, max(beer_reviews$beer_abv)))
+```
+
+\newpage
+
+Die Bewertungen über den Alkoholgehalt sind über die Zeit tendenziell gesunken. Eine Ausnahme bildet hier Starkbiere (>7%), welche mehr oder weniger konstant geblieben sind. 
+ 
+```{r score_by_abv3, echo = TRUE, fig.cap='Bewertung über die Zeit nach Alkoholgehalt (geglättet)'}
+beer_reviews %>% 
+  mutate(
+    abv_bin = case_when(
+      beer_abv < 5 ~ "< 5%",
+      between(beer_abv, 5, 5.9) ~ "5 - 5.9%",
+      between(beer_abv, 6, 6.9) ~ "6 - 6.9%",
+      TRUE ~ "> 7%"
+    ),
+    abv_bin = factor(abv_bin, levels = c(
+      "< 5%",
+      "5 - 5.9%",
+      "6 - 6.9%",
+      "> 7%"
+    ))
+  ) %>% 
+  ggplot(aes(x=review_datetime, y=review_overall, group=abv_bin, color=abv_bin, linetype=abv_bin)) +
+  geom_smooth(method = lm, formula = y ~ splines::bs(x, knots=3), size=0.7, se = FALSE, show.legend = FALSE) +
+  labs(
+    color = "Alkoholgehalt",
+    x = "Jahr",
+    y = "Bewertung"
+  ) +
+  facet_wrap(~ abv_bin) +
+  scale_colour_discrete("Alkoholgehalt") + 
+  scale_linetype_manual("Alkoholgehalt", values=c(1:10)) + 
+  scale_y_continuous(expand = c(0.05, 0.05), limits = c(0, 5))
+```
+
+\newpage
+
+Nachfolgender Graph zeigt, dass über die Zeit Bewertungen auf Biere mit höheren Alkoholgehalte abgegen worden sind: Stärkere Biere erzielen tendenziel höhere Bewertungen.
+
+
+```{r score_by_abv, echo = TRUE, fig.cap='Durchschnittliche Bewertung und Alkoholgehalt (mit geglätteter Linie)'}
+beer_reviews %>%
+  group_by(beer_style, cat_name) %>% 
+  filter(
+    !is.na(beer_abv)
+  ) %>% 
+  summarise(
+    avg_rating = mean((review_overall+review_aroma+review_appearance+review_taste+review_palate)/5),
+    avg_abv = mean(beer_abv)
+  ) %>% 
+  ggplot(aes(x=avg_abv, y=avg_rating)) +
+  geom_point(aes(shape=factor(cat_name), color=factor(cat_name)), size = 6, alpha=0.4) + 
+  scale_shape_manual(values=c(15:20,15:18)) +
+  labs(
+    color = "Kategorie",
+    shape = "Kategorie",
+    y = "Durchschnittliche Bewertung",
+    x = "Durchschnittlicher Alkoholgehalt"
+  ) + 
+  geom_smooth(method = lm, formula = y ~ splines::bs(x, knots=), size=0.7, se = FALSE, show.legend = FALSE, colour=colors[5]) +
+  scale_y_continuous(expand = c(0.05, 0.05), limits = c(0, 5))
+```
+
+
+\newpage
+
+# Fazit
+Gegeben den vorhandenen Daten, ist es nicht möglich eine qualifizierte Aussage darüber zu machen, welches Bier schlussendlich am besten bei den Konsumenten ankommt. 
+\newline
+Einerseits sind die Daten nicht vollständig: Wir gehen davon aus, dass die meisten Benutzer tendenziell eher gute Biere bewerten, was zu einer Verzerrung der Daten führt (mit einem schlechten oder eher schlechten Produkt wollen sich Konsumenten in der Regel nicht weiter beschäftigen müssen). Die Bewertungen können zudem lediglich auf den Bierstil und -Kategorie, sowie den Alkoholgehalt des jeweiligen Bieren zugeordnert werden. Interessant wäre, weitere Kennzahlen verfügbar wären, wie
+
+* Demographische Informationen
+* Preis
+* Verkaufszahlen
+* Marketing Budget
+* Ökologische Aspekte (Bio, Nachhaltigkeit, Grösse der Brauerei)
+* Weitere, typische Biermerkmale (IBU International Bittering Units, EBC European Brewery Convention, Plato Dichte usw.)
+* Chemische Zusammensetzung
+
+Um die These zu verifizieren, müssten wir zumindest die Herkunft der Benutzer, sowie aktuellere Daten haben. 
+\newline
+Eins zeigt die Analyse jedoch ziemlich deutlich: North American Lager scheint das unbeliebteste Bier zu sein. Obwohl es den grössten Anstieg in Aroma, Aussehen, Geschmack sowie Gaumen zeigt, ist die insgesamte Bewertung verglichen zu den anderen Kategorien deutlich tiefen, und vorallem wieder sinkend. 
+
+
+\newpage
+# Verzeichnisse
+
+\listoffigures
+\listoftables
+
+\newpage
+
+# Appendix A
+Die Daten wurden gemäss folgender Tabelle mit den Bierkategorien von openbeer DB gemappt (`beeradvocate.beer_style` zu `openbeerdb.category_id`).
+
+```{r apx_a, echo=FALSE}
+kable(beer_style_to_category, longtable = TRUE)
+```
